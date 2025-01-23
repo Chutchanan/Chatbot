@@ -1,0 +1,4 @@
+# .streamlit/config.toml
+
+[server]
+preRun = "setup.sh"  # This line ensures the setup.sh script is executed before your app starts.
