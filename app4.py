@@ -1,3 +1,6 @@
+import pysqlite3
+import sys
+sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
 import streamlit as st
 import openai
 import chromadb
@@ -13,7 +16,7 @@ api_key = os.getenv("API_KEY")
 client = OpenAI(api_key=api_key)
 
 # Initialize the Persistent ChromaDB client (without path argument)
-persist_directory = "D:/Project/Chatbot/chromadb_data2"
+persist_directory = "/mount/src/chromadb_data2"
 persistentClient = chromadb.PersistentClient(path=persist_directory)
 
 # Retrieve the collection
