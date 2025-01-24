@@ -7,6 +7,7 @@ import chromadb
 from dotenv import load_dotenv
 import os
 from openai import OpenAI
+from streamlit_chromadb_connection.chromadb_connection import ChromadbConnection
 
 # Load environment variables
 load_dotenv()
@@ -15,13 +16,25 @@ load_dotenv()
 api_key = os.getenv("API_KEY")
 client = OpenAI(api_key=api_key)
 
-# Initialize the Persistent ChromaDB client (without path argument)
-persist_directory = "/mount/src/chromadb_data2"
-persistentClient = chromadb.PersistentClient(path=persist_directory)
+# # Initialize the Persistent ChromaDB client (without path argument)
+# persist_directory = "/mount/src/chromadb_data2"
+# persistentClient = chromadb.PersistentClient(path=persist_directory)
 
-# Retrieve the collection
+# # Retrieve the collection
+# collection_name = "document_embeddings"
+# collection = persistentClient.get_collection(collection_name)
+
+configuration = {
+    "client": "PersistentClient",
+    "path": "/mount/src/chromadb_data2"
+}
+
 collection_name = "document_embeddings"
-collection = persistentClient.get_collection(collection_name)
+
+persistentClient = st.connection("chromadb",
+                     type=ChromaDBConnection,
+                     **configuration)
+collection = conn.get_collection_data(collection_name)
 
 # Generate embeddings using OpenAI API
 def generate_embeddings(text):
