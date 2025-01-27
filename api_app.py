@@ -10,7 +10,7 @@ from openai import OpenAI
 load_dotenv()
 
 # Access the API key
-api_key = os.getenv("API_KEY")
+api_key = os.environ.get('API_KEY')
 client = OpenAI(api_key=api_key)
 
 # Initialize the Persistent ChromaDB client
