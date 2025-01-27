@@ -27,6 +27,11 @@ except chromadb.errors.InvalidCollectionException:
 # Initialize FastAPI app
 app = FastAPI()
 
+# Root endpoint
+@app.get("/")
+async def root():
+    return {"message": "Welcome to the iCONEXT API!"}
+
 # Request model
 class QueryRequest(BaseModel):
     query: str
@@ -76,7 +81,7 @@ async def handle_query(request: QueryRequest):
 # Fix for the /favicon.ico request
 @app.get("/favicon.ico")
 async def favicon():
-    return ""  # You can return an empty response to avoid the error
+    return ""  # Empty response to prevent the error
 
 # If running locally, use uvicorn to serve the app
 if __name__ == "__main__":
