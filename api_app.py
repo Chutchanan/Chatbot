@@ -10,7 +10,7 @@ from openai import OpenAI
 load_dotenv()
 
 # Access the API key
-# api_key = os.getenv("API_KEY")
+api_key = os.getenv("API_KEY")  # Make sure to set API_KEY in your Azure App Service environment variables
 client = OpenAI(api_key=api_key)
 
 # Initialize the Persistent ChromaDB client
@@ -72,7 +72,8 @@ async def handle_query(request: QueryRequest):
         return {"query": user_query, "response": response}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
+
+# If running locally, you can use uvicorn
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("api_app:app", host="0.0.0.0", port=8000)
+    uvicorn.run("api_app:app", host="0.0.0.0", port=80)

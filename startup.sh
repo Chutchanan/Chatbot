@@ -3,4 +3,4 @@
 # source venv/bin/activate
 
 # Run the FastAPI app
-uvicorn api_app:app --host 0.0.0.0 --port 8000
+uvicorn api_app:app --host 0.0.0.0 --port 80
