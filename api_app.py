@@ -16,7 +16,8 @@ api_key = os.getenv('API_KEY')
 if not api_key:
     raise Exception("API_KEY environment variable not set!")
 
-client = OpenAI(api_key=api_key)
+# client = OpenAI(api_key=api_key)
+openai.api_key = api_key
 
 # Initialize the Persistent ChromaDB client
 persist_directory = os.path.join(os.getcwd(), "chromadb_data2")
@@ -43,7 +44,7 @@ class QueryRequest(BaseModel):
 
 # Generate embeddings using OpenAI API
 def generate_embeddings(text):
-    response = client.embeddings.create(
+    response = openai.embeddings.create(
         model="text-embedding-3-small",  # Or the appropriate embedding model
         input=text
     )
