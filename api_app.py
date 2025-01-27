@@ -5,7 +5,6 @@ import chromadb
 from dotenv import load_dotenv
 import os
 from openai import OpenAI
-import uvicorn
 
 # Load environment variables
 load_dotenv()
@@ -27,11 +26,6 @@ except chromadb.errors.InvalidCollectionException:
 
 # Initialize FastAPI app
 app = FastAPI()
-
-# Handle favicon.ico request
-@app.get("/favicon.ico")
-async def favicon():
-    return ""
 
 # Request model
 class QueryRequest(BaseModel):
@@ -79,5 +73,12 @@ async def handle_query(request: QueryRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# Fix for the /favicon.ico request
+@app.get("/favicon.ico")
+async def favicon():
+    return ""  # You can return an empty response to avoid the error
+
+# If running locally, use uvicorn to serve the app
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))  # This listens on the correct port and host for Render
+    import uvicorn
+    uvicorn.run("api_app:app", host="0.0.0.0", port=8000)
