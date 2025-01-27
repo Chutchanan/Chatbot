@@ -28,6 +28,11 @@ except chromadb.errors.InvalidCollectionException:
 # Initialize FastAPI app
 app = FastAPI()
 
+# Handle favicon.ico request
+@app.get("/favicon.ico")
+async def favicon():
+    return ""
+
 # Request model
 class QueryRequest(BaseModel):
     query: str
