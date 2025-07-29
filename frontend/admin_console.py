@@ -185,8 +185,33 @@ def show_dashboard():
             col1, col2 = st.columns(2)
             
             with col1:
-                fig = px.bar(user_data, x='username', y=['tokens_used', 'token_limit'],
-                           title='Token Usage by User')
+                fig = go.Figure()
+                
+                # Add separate bars for token limit and used tokens
+                fig.add_trace(go.Bar(
+                    name='Token Limit',
+                    x=user_data['username'],
+                    y=user_data['token_limit'],
+                    marker_color='lightblue',
+                    offsetgroup=1
+                ))
+                
+                fig.add_trace(go.Bar(
+                    name='Tokens Used',
+                    x=user_data['username'],
+                    y=user_data['tokens_used'],
+                    marker_color='darkblue',
+                    offsetgroup=2
+                ))
+                
+                fig.update_layout(
+                    title='Token Usage by User',
+                    xaxis_title='Username',
+                    yaxis_title='Tokens',
+                    barmode='group',  # This creates separate columns
+                    showlegend=True
+                )
+                
                 st.plotly_chart(fig, use_container_width=True)
             
             with col2:
@@ -349,88 +374,333 @@ def show_chat_logs():
         db.close()
 
 def show_document_management():
-    """Show document management interface"""
+    """Enhanced document management interface"""
     st.header("📄 Document Management")
     
     # Initialize embedding service
     try:
         embedding_service = EmbeddingService()
         
-        # Collection info
-        st.subheader("Collection Information")
+        # Collection info with enhanced metrics
+        st.subheader("📊 Collection Information")
         collection_info = embedding_service.get_collection_info()
         
         if "error" not in collection_info:
-            col1, col2, col3 = st.columns(3)
+            col1, col2, col3, col4 = st.columns(4)
             with col1:
                 st.metric("Collection Name", collection_info.get("name", "N/A"))
             with col2:
-                st.metric("Document Count", collection_info.get("count", 0))
+                st.metric("Total Chunks", collection_info.get("count", 0))
             with col3:
-                st.metric("Chunk Size", collection_info.get("chunk_size", "N/A"))
+                st.metric("Unique Documents", collection_info.get("unique_documents", 0))
+            with col4:
+                st.metric("Current Chunk Size", collection_info.get("chunk_size", "N/A"))
         else:
             st.error(f"Error getting collection info: {collection_info['error']}")
         
-        # Upload new documents
-        st.subheader("Upload New Documents")
+        # Create tabs for different operations
+        tab1, tab2, tab3, tab4 = st.tabs(["📁 Stored Documents", "⬆️ Upload Documents", "🔍 Test Search", "⚙️ Settings"])
         
-        uploaded_files = st.file_uploader(
-            "Choose files",
-            accept_multiple_files=True,
-            type=['pdf', 'txt', 'csv']
-        )
-        
-        if uploaded_files:
-            if st.button("Process and Upload Documents"):
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                
-                for i, uploaded_file in enumerate(uploaded_files):
-                    status_text.text(f"Processing {uploaded_file.name}...")
-                    
-                    # Save uploaded file temporarily
-                    temp_path = f"temp_{uploaded_file.name}"
-                    with open(temp_path, "wb") as f:
-                        f.write(uploaded_file.getbuffer())
-                    
-                    try:
-                        # Add to vector store
-                        embedding_service.add_single_document(temp_path)
-                        st.success(f"Successfully processed: {uploaded_file.name}")
-                    except Exception as e:
-                        st.error(f"Error processing {uploaded_file.name}: {e}")
-                    finally:
-                        # Clean up temporary file
-                        if os.path.exists(temp_path):
-                            os.remove(temp_path)
-                    
-                    progress_bar.progress((i + 1) / len(uploaded_files))
-                
-                status_text.text("Upload completed!")
+        # Tab 1: List and manage stored documents
+        with tab1:
+            st.subheader("Stored Documents")
+            
+            # Refresh button
+            if st.button("🔄 Refresh List"):
                 st.rerun()
-        
-        # Test search functionality
-        st.subheader("Test Search")
-        
-        test_query = st.text_input("Enter test query")
-        
-        if test_query:
-            if st.button("Search"):
-                try:
-                    results = embedding_service.search_similar_documents(test_query, k=3)
+            
+            # Get list of stored documents
+            stored_docs = embedding_service.list_stored_documents()
+            
+            if stored_docs:
+                st.write(f"**Found {len(stored_docs)} documents:**")
+                
+                # Create a dataframe for better display
+                doc_data = pd.DataFrame(stored_docs)
+                
+                # Display documents with action buttons
+                for idx, doc in enumerate(stored_docs):
+                    with st.expander(f"📄 {doc['filename']} ({doc['chunk_count']} chunks)"):
+                        col1, col2, col3 = st.columns([2, 1, 1])
+                        
+                        with col1:
+                            st.write(f"**Filename:** {doc['filename']}")
+                            st.write(f"**Chunks:** {doc['chunk_count']}")
+                        
+                        with col2:
+                            # Preview chunks button
+                            if st.button("👁️ Preview", key=f"preview_{idx}"):
+                                st.session_state[f"show_preview_{idx}"] = True
+                        
+                        with col3:
+                            # Delete button with confirmation
+                            if st.button("🗑️ Delete", key=f"delete_{idx}", type="secondary"):
+                                st.session_state[f"confirm_delete_{idx}"] = True
+                        
+                        # Show preview if requested
+                        if st.session_state.get(f"show_preview_{idx}", False):
+                            chunks = embedding_service.get_document_chunks(doc['filename'], limit=3)
+                            if chunks:
+                                st.write("**Sample chunks:**")
+                                for i, chunk in enumerate(chunks[:3], 1):
+                                    st.write(f"**Chunk {i}:** {chunk['content']}")
+                            else:
+                                st.info("No chunks to preview")
+                        
+                        # Show delete confirmation
+                        if st.session_state.get(f"confirm_delete_{idx}", False):
+                            st.warning(f"⚠️ Are you sure you want to delete '{doc['filename']}'?")
+                            st.write("This will remove all chunks of this document from the vector database.")
+                            
+                            col_confirm, col_cancel = st.columns(2)
+                            with col_confirm:
+                                if st.button("✅ Yes, Delete", key=f"confirm_{idx}", type="primary"):
+                                    if embedding_service.remove_document_by_filename(doc['filename']):
+                                        st.success(f"Successfully deleted '{doc['filename']}'")
+                                        # Clear session state
+                                        st.session_state[f"confirm_delete_{idx}"] = False
+                                        st.rerun()
+                                    else:
+                                        st.error(f"Failed to delete '{doc['filename']}'")
+                            
+                            with col_cancel:
+                                if st.button("❌ Cancel", key=f"cancel_{idx}"):
+                                    st.session_state[f"confirm_delete_{idx}"] = False
+                                    st.rerun()
+                
+                # Bulk operations
+                st.subheader("🔧 Bulk Operations")
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    if st.button("🗑️ Clear All Documents", type="secondary"):
+                        st.session_state.confirm_clear_all = True
+                
+                # Clear all confirmation
+                if st.session_state.get("confirm_clear_all", False):
+                    st.warning("⚠️ **WARNING: This will delete ALL documents from the collection!**")
+                    st.write("This action cannot be undone.")
                     
-                    if results:
-                        st.write("**Search Results:**")
-                        for i, result in enumerate(results, 1):
-                            with st.expander(f"Result {i}"):
-                                st.write(result.page_content)
-                    else:
-                        st.info("No results found")
-                except Exception as e:
-                    st.error(f"Search error: {e}")
+                    col_confirm, col_cancel = st.columns(2)
+                    with col_confirm:
+                        if st.button("✅ Yes, Clear All", type="primary"):
+                            if embedding_service.clear_all_documents():
+                                st.success("All documents cleared successfully!")
+                                st.session_state.confirm_clear_all = False
+                                st.rerun()
+                            else:
+                                st.error("Failed to clear documents")
+                    
+                    with col_cancel:
+                        if st.button("❌ Cancel"):
+                            st.session_state.confirm_clear_all = False
+                            st.rerun()
+            else:
+                st.info("No documents stored in the collection yet.")
+                st.write("Upload some documents in the 'Upload Documents' tab to get started!")
+        
+        # Tab 2: Upload new documents with configurable settings
+        with tab2:
+            st.subheader("Upload New Documents")
+            
+            # Chunk settings configuration
+            st.subheader("🔧 Chunk Settings")
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                chunk_size = st.number_input(
+                    "Chunk Size", 
+                    min_value=100, 
+                    max_value=8000, 
+                    value=collection_info.get("chunk_size", 5000),
+                    step=100,
+                    help="Size of each text chunk in characters"
+                )
+            
+            with col2:
+                chunk_overlap = st.number_input(
+                    "Chunk Overlap", 
+                    min_value=0, 
+                    max_value=chunk_size//2, 
+                    value=min(collection_info.get("chunk_overlap", 500), chunk_size//2),
+                    step=50,
+                    help="Overlap between consecutive chunks"
+                )
+            
+            # Settings info
+            st.info(f"📝 Files will be processed with {chunk_size} character chunks and {chunk_overlap} character overlap")
+            
+            # File upload
+            uploaded_files = st.file_uploader(
+                "Choose files",
+                accept_multiple_files=True,
+                type=['pdf', 'txt', 'csv'],
+                help="Supported formats: PDF, TXT, CSV"
+            )
+            
+            if uploaded_files:
+                st.write(f"**Selected {len(uploaded_files)} file(s):**")
+                for file in uploaded_files:
+                    st.write(f"- {file.name} ({file.size} bytes)")
+                
+                if st.button("🚀 Process and Upload Documents", type="primary"):
+                    # Create embedding service with custom settings
+                    custom_embedding_service = EmbeddingService(
+                        custom_chunk_size=chunk_size,
+                        custom_chunk_overlap=chunk_overlap
+                    )
+                    
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    success_count = 0
+                    error_count = 0
+                    
+                    for i, uploaded_file in enumerate(uploaded_files):
+                        status_text.text(f"Processing {uploaded_file.name}... ({i+1}/{len(uploaded_files)})")
+                        
+                        # Save uploaded file temporarily
+                        temp_path = f"temp_{uploaded_file.name}"
+                        with open(temp_path, "wb") as f:
+                            f.write(uploaded_file.getbuffer())
+                        
+                        try:
+                            # Add to vector store with custom settings
+                            if custom_embedding_service.add_single_document(temp_path, uploaded_file.name):
+                                st.success(f"✅ Successfully processed: {uploaded_file.name}")
+                                success_count += 1
+                            else:
+                                st.warning(f"⚠️ No content processed from: {uploaded_file.name}")
+                                error_count += 1
+                        except Exception as e:
+                            st.error(f"❌ Error processing {uploaded_file.name}: {e}")
+                            error_count += 1
+                        finally:
+                            # Clean up temporary file
+                            if os.path.exists(temp_path):
+                                os.remove(temp_path)
+                        
+                        progress_bar.progress((i + 1) / len(uploaded_files))
+                    
+                    status_text.text(f"Upload completed! ✅ {success_count} successful, ❌ {error_count} errors")
+                    
+                    if success_count > 0:
+                        st.balloons()
+                        # Wait a moment then refresh
+                        import time
+                        time.sleep(1)
+                        st.rerun()
+        
+        # Tab 3: Test search functionality
+        with tab3:
+            st.subheader("🔍 Test Search")
+            
+            test_query = st.text_input("Enter test query", placeholder="What is our company about?")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                search_k = st.number_input("Number of results", min_value=1, max_value=10, value=3)
+            
+            if test_query:
+                if st.button("🔍 Search", type="primary"):
+                    with st.spinner("Searching..."):
+                        try:
+                            results = embedding_service.search_similar_documents(test_query, k=search_k)
+                            
+                            if results:
+                                st.write(f"**Found {len(results)} results:**")
+                                for i, result in enumerate(results, 1):
+                                    with st.expander(f"Result {i} - Score: {getattr(result, 'score', 'N/A')}"):
+                                        st.write("**Content:**")
+                                        st.write(result.page_content)
+                                        
+                                        if hasattr(result, 'metadata') and result.metadata:
+                                            st.write("**Source:**")
+                                            filename = result.metadata.get('filename', 'Unknown')
+                                            st.write(f"📄 {filename}")
+                            else:
+                                st.info("No results found for your query.")
+                                st.write("Try different keywords or check if documents are uploaded correctly.")
+                        except Exception as e:
+                            st.error(f"Search error: {e}")
+        
+        # Tab 4: Settings and statistics
+        with tab4:
+            st.subheader("⚙️ Collection Settings & Statistics")
+            
+            # Current settings
+            stats = embedding_service.get_chunk_statistics()
+            
+            if "error" not in stats:
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.write("**Current Configuration:**")
+                    st.write(f"- Chunk Size: {stats.get('configured_chunk_size', 'N/A')}")
+                    st.write(f"- Chunk Overlap: {stats.get('configured_overlap', 'N/A')}")
+                    st.write(f"- Total Chunks: {stats.get('total_chunks', 0)}")
+                    st.write(f"- Unique Documents: {stats.get('unique_documents', 0)}")
+                
+                with col2:
+                    st.write("**Chunk Statistics:**")
+                    st.write(f"- Average Length: {stats.get('average_actual_length', 0):.1f} chars")
+                    st.write(f"- Min Length: {stats.get('min_length', 0)} chars")
+                    st.write(f"- Max Length: {stats.get('max_length', 0)} chars")
+                    st.write(f"- Sample Size: {stats.get('sample_size', 0)} chunks")
+                
+                # Manual clear section
+                st.subheader("🗑️ Database Cleanup")
+                
+                # Check if there are any chunks at all
+                total_chunks = collection_info.get("count", 0)
+                
+                if total_chunks > 0:
+                    st.warning(f"Found {total_chunks} total chunks in the database")
+                    
+                    if st.button("🗑️ Clear Entire Collection", type="secondary"):
+                        st.session_state.confirm_clear_entire = True
+                    
+                    # Clear confirmation
+                    if st.session_state.get("confirm_clear_entire", False):
+                        st.error("⚠️ **WARNING: This will delete ALL chunks from the collection!**")
+                        st.write("This action cannot be undone")
+                        
+                        col_confirm, col_cancel = st.columns(2)
+                        with col_confirm:
+                            if st.button("✅ Yes, Clear Everything", type="primary"):
+                                if embedding_service.clear_all_documents():
+                                    st.success("✅ Entire collection cleared successfully!")
+                                    st.session_state.confirm_clear_entire = False
+                                    st.balloons()
+                                    st.rerun()
+                                else:
+                                    st.error("❌ Failed to clear collection")
+                        
+                        with col_cancel:
+                            if st.button("❌ Cancel"):
+                                st.session_state.confirm_clear_entire = False
+                                st.rerun()
+                else:
+                    st.info("Collection is empty - no chunks to clear")
+                
+                # Chunk size recommendations
+                st.subheader("💡 Chunk Size Recommendations")
+                
+                recommendations = {
+                    "Small (500-1000)": "Best for specific, detailed queries and FAQ-style content",
+                    "Medium (1000-2000)": "Balanced approach, good for most business documents", 
+                    "Large (2000-4000)": "Better context retention, good for complex technical documents",
+                    "XLarge (4000+)": "Maximum context, use for very long documents or research papers"
+                }
+                
+                for size_range, description in recommendations.items():
+                    st.write(f"**{size_range}:** {description}")
+            
+            else:
+                st.error(f"Error getting statistics: {stats['error']}")
         
     except Exception as e:
         st.error(f"Error initializing document management: {e}")
+        st.write("Please check your configuration and try again.")
 
 if __name__ == "__main__":
     main()

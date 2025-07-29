@@ -1,6 +1,6 @@
 import os
 import logging
-from typing import List, Optional
+from typing import List, Optional, Dict
 from pathlib import Path
 import chromadb
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -193,6 +193,13 @@ class EmbeddingService:
                     logger.info(f"Processing file: {file_path}")
                     documents = self.load_document(str(file_path))
                     if documents:
+                        # Add filename metadata to each document
+                        for doc in documents:
+                            if not hasattr(doc, 'metadata'):
+                                doc.metadata = {}
+                            doc.metadata['filename'] = file_path.name
+                            doc.metadata['filepath'] = str(file_path)
+                        
                         all_documents.extend(documents)
                         processed_files.append(file_path.name)
                 except Exception as e:
@@ -230,20 +237,136 @@ class EmbeddingService:
         logger.info(f"Files processed: {', '.join(processed_files)}")
         logger.info(f"Total chunks created: {len(texts)}")
     
-    def add_single_document(self, file_path: str):
+    def add_single_document(self, file_path: str, filename: str = None):
         """Add a single document to the vector store"""
         try:
             documents = self.load_document(file_path)
             if documents:
+                # Add filename metadata
+                display_filename = filename or Path(file_path).name
+                for doc in documents:
+                    if not hasattr(doc, 'metadata'):
+                        doc.metadata = {}
+                    doc.metadata['filename'] = display_filename
+                    doc.metadata['filepath'] = file_path
+                
                 texts = self.text_splitter.split_documents(documents)
                 self.vectorstore.add_documents(texts)
                 self.vectorstore.persist()
-                logger.info(f"Successfully added document: {file_path} ({len(texts)} chunks)")
+                logger.info(f"Successfully added document: {display_filename} ({len(texts)} chunks)")
+                return True
             else:
                 logger.warning(f"No content loaded from: {file_path}")
+                return False
         except Exception as e:
             logger.error(f"Error adding document {file_path}: {e}")
             raise
+    
+    def remove_document_by_filename(self, filename: str) -> bool:
+        """Remove all chunks of a document by filename"""
+        try:
+            client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIRECTORY)
+            collection = client.get_collection(COLLECTION_NAME)
+            
+            # Get all documents with this filename
+            results = collection.get(where={"filename": filename})
+            
+            if results and results['ids']:
+                # Delete all chunks with this filename
+                collection.delete(where={"filename": filename})
+                logger.info(f"Removed {len(results['ids'])} chunks for file: {filename}")
+                
+                # Reinitialize vectorstore to reflect changes
+                self._initialize_vectorstore()
+                return True
+            else:
+                logger.warning(f"No chunks found for file: {filename}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error removing document {filename}: {e}")
+            return False
+    
+    def list_stored_documents(self) -> List[Dict]:
+        """List all unique documents stored in the collection"""
+        try:
+            client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIRECTORY)
+            collection = client.get_collection(COLLECTION_NAME)
+            
+            # Get all metadata
+            results = collection.get()
+            
+            if not results or not results['metadatas']:
+                return []
+            
+            # Extract unique filenames with chunk counts
+            filename_counts = {}
+            for metadata in results['metadatas']:
+                if metadata and 'filename' in metadata:
+                    filename = metadata['filename']
+                    filename_counts[filename] = filename_counts.get(filename, 0) + 1
+            
+            # Convert to list of dicts
+            documents = []
+            for filename, chunk_count in filename_counts.items():
+                documents.append({
+                    'filename': filename,
+                    'chunk_count': chunk_count
+                })
+            
+            # Sort by filename
+            documents.sort(key=lambda x: x['filename'])
+            return documents
+            
+        except Exception as e:
+            logger.error(f"Error listing documents: {e}")
+            return []
+    
+    def clear_all_documents(self) -> bool:
+        """Clear all documents from the collection"""
+        try:
+            client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIRECTORY)
+            client.delete_collection(COLLECTION_NAME)
+            
+            # Reinitialize vectorstore
+            self._initialize_vectorstore()
+            
+            logger.info("All documents cleared from collection")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error clearing all documents: {e}")
+            return False
+    
+    def get_document_chunks(self, filename: str, limit: int = 5) -> List[Dict]:
+        """Get sample chunks for a specific document"""
+        try:
+            client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIRECTORY)
+            collection = client.get_collection(COLLECTION_NAME)
+            
+            # Get chunks for this filename
+            results = collection.get(
+                where={"filename": filename},
+                limit=limit
+            )
+            
+            chunks = []
+            if results and results['documents']:
+                for i, (doc_id, content, metadata) in enumerate(zip(
+                    results['ids'], results['documents'], results['metadatas']
+                )):
+                    chunks.append({
+                        'id': doc_id,
+                        'content': content[:200] + "..." if len(content) > 200 else content,
+                        'full_content': content,
+                        'metadata': metadata
+                    })
+            
+            return chunks
+            
+        except Exception as e:
+            logger.error(f"Error getting document chunks for {filename}: {e}")
+            return []
     
     def search_similar_documents(self, query: str, k: int = None) -> List:
         """Search for similar documents"""
@@ -263,9 +386,14 @@ class EmbeddingService:
         try:
             client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIRECTORY)
             collection = client.get_collection(COLLECTION_NAME)
+            
+            # Count unique documents
+            unique_docs = len(self.list_stored_documents())
+            
             return {
                 "name": collection.name,
                 "count": collection.count(),
+                "unique_documents": unique_docs,
                 "metadata": collection.metadata,
                 "chunk_size": self.chunk_size,
                 "chunk_overlap": self.chunk_overlap
@@ -292,6 +420,7 @@ class EmbeddingService:
                 
                 return {
                     "total_chunks": info["count"],
+                    "unique_documents": info.get("unique_documents", 0),
                     "configured_chunk_size": self.chunk_size,
                     "configured_overlap": self.chunk_overlap,
                     "average_actual_length": round(avg_length, 1),
@@ -315,9 +444,11 @@ if __name__ == "__main__":
     print(f"\n🚀 Initializing EmbeddingService...")
     embedding_service = EmbeddingService()
     
-    # Process company documents
-    print(f"\n📚 Processing documents...")
-    embedding_service.process_and_store_documents("./data/company_docs")
+    # Test document listing
+    print(f"\n📋 Listing stored documents...")
+    docs = embedding_service.list_stored_documents()
+    for doc in docs:
+        print(f"  - {doc['filename']} ({doc['chunk_count']} chunks)")
     
     # Get collection info
     info = embedding_service.get_collection_info()

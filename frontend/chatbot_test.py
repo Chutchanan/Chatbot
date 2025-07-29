@@ -60,7 +60,7 @@ except Exception as e:
 
 # Page config
 st.set_page_config(
-    page_title="Bluebik Vulcan Assistance",
+    page_title="AI Chatbot",
     page_icon="🤖",
     layout="wide"
 )
@@ -96,23 +96,32 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-def authenticate_user(username: str, db) -> User:
-    """Authenticate user - simplified for demo"""
+def authenticate_user(username: str, password: str, db) -> User:
+    """Authenticate user with username and password"""
+    # Check if user exists
     user = db.query(User).filter(User.username == username).first()
-    return user
+    
+    if user:
+        # Default password is same as username
+        if password == username:
+            return user
+        else:
+            return None
+    return None
 
 def main():
-    st.title("🤖 Company Chatbot")
+    st.title("🤖 AI Chatbot")
     
     # Sidebar for user authentication
     with st.sidebar:
         st.header("User Login")
         username = st.text_input("Username", placeholder="Enter: demo, user1, or user2")
+        password = st.text_input("Password", type="password", placeholder="Enter password")
         
         if st.button("Login"):
-            if username:
+            if username and password:
                 db = get_db_session()
-                user = authenticate_user(username, db)
+                user = authenticate_user(username, password, db)
                 if user and user.is_active:
                     st.session_state.user_id = user.id
                     st.session_state.username = user.username
@@ -120,11 +129,12 @@ def main():
                     st.session_state.tokens_used = user.tokens_used
                     st.success(f"Welcome, {username}!")
                 else:
-                    st.error("Invalid username or inactive account")
-                    st.info("Try: demo, user1, or user2")
+                    st.error("Invalid username or password")
+                    st.info("💡 Default password is same as username")
+                    st.info("Try: demo/demo, user1/user1, user2/user2")
                 db.close()
             else:
-                st.error("Please enter a username")
+                st.error("Please enter both username and password")
         
         # Show user info if logged in
         if 'user_id' in st.session_state:
@@ -140,7 +150,7 @@ def main():
     # Main chat interface
     if 'user_id' not in st.session_state:
         st.warning("Please login to start chatting")
-        st.info("💡 Available usernames: demo, user1, user2")
+        st.info("💡 Login with: demo/demo, user1/user1, or user2/user2")
         return
     
     # Initialize chat history
