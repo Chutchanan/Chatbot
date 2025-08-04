@@ -32,7 +32,8 @@ try:
         MAX_RETRIES,
         LOG_LEVEL,
         MAX_FILE_SIZE_MB,
-        SUPPORTED_EXTENSIONS
+        SUPPORTED_EXTENSIONS,
+        FACULTIES
     )
 except ImportError:
     # Fallback config if import fails
@@ -49,25 +50,32 @@ except ImportError:
     LOG_LEVEL = "INFO"
     MAX_FILE_SIZE_MB = 10
     SUPPORTED_EXTENSIONS = ['.txt', '.pdf', '.csv']
+    FACULTIES = ["engineering", "business", "science", "arts"]
 
 # Set up logging
 logging.basicConfig(level=getattr(logging, LOG_LEVEL.upper()))
 logger = logging.getLogger(__name__)
 
 class EmbeddingService:
-    def __init__(self, custom_chunk_size=None, custom_chunk_overlap=None):
+    def __init__(self, faculty=None, custom_chunk_size=None, custom_chunk_overlap=None):
         """
-        Initialize embedding service with configurable chunk settings
+        Initialize embedding service with faculty support
         
         Args:
+            faculty: Faculty name for faculty-specific collections
             custom_chunk_size: Override chunk size from config
             custom_chunk_overlap: Override chunk overlap from config
         """
+        # Set faculty and collection name
+        self.faculty = faculty
+        self.collection_name = self._get_collection_name(faculty)
+        
         # Set chunk configuration
         self.chunk_size = custom_chunk_size or CHUNK_SIZE
         self.chunk_overlap = custom_chunk_overlap or CHUNK_OVERLAP
         
-        logger.info(f"Initializing with chunk_size={self.chunk_size}, chunk_overlap={self.chunk_overlap}")
+        logger.info(f"Initializing with faculty={faculty}, collection={self.collection_name}")
+        logger.info(f"Chunk settings: size={self.chunk_size}, overlap={self.chunk_overlap}")
         
         # Initialize components
         self.embeddings = OpenAIEmbeddings(
@@ -84,6 +92,67 @@ class EmbeddingService:
         
         self.vectorstore = None
         self._initialize_vectorstore()
+    
+    def _get_collection_name(self, faculty):
+        """Generate collection name based on faculty"""
+        if faculty:
+            return f"{COLLECTION_NAME}_{faculty}"
+        return COLLECTION_NAME
+    
+    @staticmethod
+    def get_all_faculty_collections():
+        """Get list of all faculty collections"""
+        collections = []
+        try:
+            client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIRECTORY)
+            all_collections = client.list_collections()
+            
+            # Valid faculties from config plus general
+            valid_faculties = set(FACULTIES + ["general"])
+            
+            for collection in all_collections:
+                collection_name = collection.name
+                
+                # Skip collections that don't match our naming pattern
+                if not collection_name.startswith(COLLECTION_NAME):
+                    continue
+                
+                if "_" in collection_name and collection_name.startswith(f"{COLLECTION_NAME}_"):
+                    # Extract faculty name after the base collection name
+                    faculty = collection_name.replace(f"{COLLECTION_NAME}_", "", 1)
+                    
+                    # Only include valid faculties (avoid duplicates like 'documents_arts')
+                    if faculty in valid_faculties and not faculty.startswith("documents"):
+                        collections.append({
+                            "faculty": faculty,
+                            "collection_name": collection_name,
+                            "count": collection.count()
+                        })
+                elif collection_name == COLLECTION_NAME:
+                    # Base collection (general)
+                    collections.append({
+                        "faculty": "general",
+                        "collection_name": collection_name,
+                        "count": collection.count()
+                    })
+        except Exception as e:
+            logger.error(f"Error getting faculty collections: {e}")
+        
+        return collections
+    
+    @staticmethod
+    def get_available_faculties():
+        """Get list of available faculties from config and existing collections"""
+        # Start with configured faculties
+        available = set(FACULTIES)
+        
+        # Add faculties from existing collections
+        collections = EmbeddingService.get_all_faculty_collections()
+        for collection_info in collections:
+            if collection_info["faculty"] != "general":
+                available.add(collection_info["faculty"])
+        
+        return sorted(list(available))
     
     def update_chunk_settings(self, chunk_size=None, chunk_overlap=None):
         """Update chunk settings and reinitialize text splitter"""
@@ -106,11 +175,11 @@ class EmbeddingService:
         """Initialize Chroma vector store"""
         try:
             self.vectorstore = Chroma(
-                collection_name=COLLECTION_NAME,
+                collection_name=self.collection_name,
                 embedding_function=self.embeddings,
                 persist_directory=CHROMA_PERSIST_DIRECTORY
             )
-            logger.info("Vector store initialized successfully")
+            logger.info(f"Vector store initialized for collection: {self.collection_name}")
         except Exception as e:
             logger.error(f"Error initializing vector store: {e}")
             raise
@@ -174,10 +243,10 @@ class EmbeddingService:
         
         # Clear existing collection if reprocessing
         if reprocess:
-            logger.info("Clearing existing collection for reprocessing...")
+            logger.info(f"Clearing existing collection {self.collection_name} for reprocessing...")
             try:
                 client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIRECTORY)
-                client.delete_collection(COLLECTION_NAME)
+                client.delete_collection(self.collection_name)
                 # Reinitialize vectorstore
                 self._initialize_vectorstore()
             except Exception as e:
@@ -193,12 +262,13 @@ class EmbeddingService:
                     logger.info(f"Processing file: {file_path}")
                     documents = self.load_document(str(file_path))
                     if documents:
-                        # Add filename metadata to each document
+                        # Add filename and faculty metadata to each document
                         for doc in documents:
                             if not hasattr(doc, 'metadata'):
                                 doc.metadata = {}
                             doc.metadata['filename'] = file_path.name
                             doc.metadata['filepath'] = str(file_path)
+                            doc.metadata['faculty'] = self.faculty or 'general'
                         
                         all_documents.extend(documents)
                         processed_files.append(file_path.name)
@@ -209,17 +279,22 @@ class EmbeddingService:
             logger.warning("No documents found to process")
             return
         
-        # Split documents into chunks
+        # Split documents into chunks - respect admin settings
         logger.info(f"Splitting {len(all_documents)} documents into chunks (size={self.chunk_size}, overlap={self.chunk_overlap})")
+        
         texts = self.text_splitter.split_documents(all_documents)
         
-        # Limit chunks per document if configured
-        if MAX_CHUNKS_PER_DOCUMENT > 0 and len(texts) > MAX_CHUNKS_PER_DOCUMENT * len(all_documents):
-            logger.info(f"Limiting to {MAX_CHUNKS_PER_DOCUMENT} chunks per document")
-            texts = texts[:MAX_CHUNKS_PER_DOCUMENT * len(all_documents)]
+        # Log chunk sizes for debugging
+        if texts:
+            chunk_lengths = [len(chunk.page_content) for chunk in texts[:5]]  # First 5 chunks
+            avg_length = sum(chunk_lengths) / len(chunk_lengths)
+            logger.info(f"Sample chunk lengths: {chunk_lengths}")
+            logger.info(f"Average chunk length: {avg_length:.0f} characters")
+        
+        # Store all chunks without limits
+        logger.info(f"Storing all {len(texts)} chunks in vector database")
         
         # Store in vector database in batches
-        logger.info(f"Storing {len(texts)} chunks in vector database")
         batch_size = BATCH_SIZE
         
         for i in range(0, len(texts), batch_size):
@@ -236,24 +311,26 @@ class EmbeddingService:
         logger.info(f"Successfully processed and stored {len(all_documents)} documents from {len(processed_files)} files")
         logger.info(f"Files processed: {', '.join(processed_files)}")
         logger.info(f"Total chunks created: {len(texts)}")
+        logger.info(f"Faculty: {self.faculty or 'general'}")
     
     def add_single_document(self, file_path: str, filename: str = None):
         """Add a single document to the vector store"""
         try:
             documents = self.load_document(file_path)
             if documents:
-                # Add filename metadata
+                # Add filename and faculty metadata
                 display_filename = filename or Path(file_path).name
                 for doc in documents:
                     if not hasattr(doc, 'metadata'):
                         doc.metadata = {}
                     doc.metadata['filename'] = display_filename
                     doc.metadata['filepath'] = file_path
+                    doc.metadata['faculty'] = self.faculty or 'general'
                 
                 texts = self.text_splitter.split_documents(documents)
                 self.vectorstore.add_documents(texts)
                 self.vectorstore.persist()
-                logger.info(f"Successfully added document: {display_filename} ({len(texts)} chunks)")
+                logger.info(f"Successfully added document: {display_filename} ({len(texts)} chunks) to {self.faculty or 'general'} faculty")
                 return True
             else:
                 logger.warning(f"No content loaded from: {file_path}")
@@ -266,7 +343,7 @@ class EmbeddingService:
         """Remove all chunks of a document by filename"""
         try:
             client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIRECTORY)
-            collection = client.get_collection(COLLECTION_NAME)
+            collection = client.get_collection(self.collection_name)
             
             # Get all documents with this filename
             results = collection.get(where={"filename": filename})
@@ -274,7 +351,7 @@ class EmbeddingService:
             if results and results['ids']:
                 # Delete all chunks with this filename
                 collection.delete(where={"filename": filename})
-                logger.info(f"Removed {len(results['ids'])} chunks for file: {filename}")
+                logger.info(f"Removed {len(results['ids'])} chunks for file: {filename} from {self.faculty or 'general'} faculty")
                 
                 # Reinitialize vectorstore to reflect changes
                 self._initialize_vectorstore()
@@ -291,7 +368,7 @@ class EmbeddingService:
         """List all unique documents stored in the collection"""
         try:
             client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIRECTORY)
-            collection = client.get_collection(COLLECTION_NAME)
+            collection = client.get_collection(self.collection_name)
             
             # Get all metadata
             results = collection.get()
@@ -311,7 +388,8 @@ class EmbeddingService:
             for filename, chunk_count in filename_counts.items():
                 documents.append({
                     'filename': filename,
-                    'chunk_count': chunk_count
+                    'chunk_count': chunk_count,
+                    'faculty': self.faculty or 'general'
                 })
             
             # Sort by filename
@@ -319,30 +397,30 @@ class EmbeddingService:
             return documents
             
         except Exception as e:
-            logger.error(f"Error listing documents: {e}")
+            logger.error(f"Error listing documents for {self.faculty or 'general'}: {e}")
             return []
     
     def clear_all_documents(self) -> bool:
         """Clear all documents from the collection"""
         try:
             client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIRECTORY)
-            client.delete_collection(COLLECTION_NAME)
+            client.delete_collection(self.collection_name)
             
             # Reinitialize vectorstore
             self._initialize_vectorstore()
             
-            logger.info("All documents cleared from collection")
+            logger.info(f"All documents cleared from collection: {self.collection_name}")
             return True
             
         except Exception as e:
-            logger.error(f"Error clearing all documents: {e}")
+            logger.error(f"Error clearing all documents from {self.collection_name}: {e}")
             return False
     
     def get_document_chunks(self, filename: str, limit: int = 5) -> List[Dict]:
         """Get sample chunks for a specific document"""
         try:
             client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIRECTORY)
-            collection = client.get_collection(COLLECTION_NAME)
+            collection = client.get_collection(self.collection_name)
             
             # Get chunks for this filename
             results = collection.get(
@@ -369,29 +447,30 @@ class EmbeddingService:
             return []
     
     def search_similar_documents(self, query: str, k: int = None) -> List:
-        """Search for similar documents"""
+        """Search for similar documents with increased default results"""
         if k is None:
-            k = SIMILARITY_SEARCH_K
+            k = SIMILARITY_SEARCH_K  # Now defaults to 8 instead of 3
             
         try:
             results = self.vectorstore.similarity_search(query, k=k)
-            logger.debug(f"Search for '{query}' returned {len(results)} results")
+            logger.debug(f"Search for '{query}' in {self.faculty or 'general'} returned {len(results)} results")
             return results
         except Exception as e:
-            logger.error(f"Error searching documents: {e}")
+            logger.error(f"Error searching documents in {self.faculty or 'general'}: {e}")
             return []
     
     def get_collection_info(self) -> dict:
         """Get information about the collection"""
         try:
             client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIRECTORY)
-            collection = client.get_collection(COLLECTION_NAME)
+            collection = client.get_collection(self.collection_name)
             
             # Count unique documents
             unique_docs = len(self.list_stored_documents())
             
             return {
                 "name": collection.name,
+                "faculty": self.faculty or 'general',
                 "count": collection.count(),
                 "unique_documents": unique_docs,
                 "metadata": collection.metadata,
@@ -399,7 +478,7 @@ class EmbeddingService:
                 "chunk_overlap": self.chunk_overlap
             }
         except Exception as e:
-            logger.error(f"Error getting collection info: {e}")
+            logger.error(f"Error getting collection info for {self.faculty or 'general'}: {e}")
             return {"error": str(e)}
     
     def get_chunk_statistics(self) -> dict:
@@ -419,6 +498,7 @@ class EmbeddingService:
                 max_length = max(chunk_lengths)
                 
                 return {
+                    "faculty": self.faculty or 'general',
                     "total_chunks": info["count"],
                     "unique_documents": info.get("unique_documents", 0),
                     "configured_chunk_size": self.chunk_size,
@@ -429,31 +509,32 @@ class EmbeddingService:
                     "sample_size": len(sample_results)
                 }
             else:
-                return {"error": "No chunks found for analysis"}
+                return {"error": "No chunks found for analysis", "faculty": self.faculty or 'general'}
                 
         except Exception as e:
-            logger.error(f"Error getting chunk statistics: {e}")
-            return {"error": str(e)}
+            logger.error(f"Error getting chunk statistics for {self.faculty or 'general'}: {e}")
+            return {"error": str(e), "faculty": self.faculty or 'general'}
 
 # Usage example
 if __name__ == "__main__":
-    print("🔧 Embedding Service Test")
-    print("=" * 30)
+    print("🔧 Faculty-Aware Embedding Service Test")
+    print("=" * 40)
     
-    # Initialize with config settings
-    print(f"\n🚀 Initializing EmbeddingService...")
-    embedding_service = EmbeddingService()
+    # Test faculty collections
+    faculties = EmbeddingService.get_available_faculties()
+    print(f"\n📚 Available faculties: {faculties}")
     
-    # Test document listing
-    print(f"\n📋 Listing stored documents...")
-    docs = embedding_service.list_stored_documents()
-    for doc in docs:
-        print(f"  - {doc['filename']} ({doc['chunk_count']} chunks)")
+    collections = EmbeddingService.get_all_faculty_collections()
+    print(f"\n📊 Existing collections:")
+    for collection_info in collections:
+        print(f"  - {collection_info['faculty']}: {collection_info['count']} documents")
     
-    # Get collection info
-    info = embedding_service.get_collection_info()
-    print(f"\n📊 Collection info: {info}")
-    
-    # Get chunk statistics
-    stats = embedding_service.get_chunk_statistics()
-    print(f"\n📈 Chunk statistics: {stats}")
+    # Test with specific faculty
+    if faculties:
+        test_faculty = faculties[0]
+        print(f"\n🚀 Testing with faculty: {test_faculty}")
+        embedding_service = EmbeddingService(faculty=test_faculty)
+        
+        # Get collection info
+        info = embedding_service.get_collection_info()
+        print(f"📊 Collection info: {info}")

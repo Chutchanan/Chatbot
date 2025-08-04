@@ -18,12 +18,13 @@ from sqlalchemy.ext.declarative import declarative_base
 from services.embedding_service import EmbeddingService
 
 try:
-    from config import ADMIN_USERNAME, ADMIN_PASSWORD, DEFAULT_TOKEN_LIMIT, DATABASE_URL
+    from config import ADMIN_USERNAME, ADMIN_PASSWORD, DEFAULT_TOKEN_LIMIT, DATABASE_URL, FACULTIES
 except ImportError:
     ADMIN_USERNAME = "admin"
     ADMIN_PASSWORD = "admin123"
     DEFAULT_TOKEN_LIMIT = 1000
     DATABASE_URL = "sqlite:///./chatbot.db"
+    FACULTIES = ["engineering", "business", "science", "arts"]
 
 # Define models directly to avoid import issues
 Base = declarative_base()
@@ -34,6 +35,7 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String, unique=True, index=True)
     email = Column(String, unique=True, index=True)
+    faculty = Column(String, default="general")
     token_limit = Column(Integer, default=1000)
     tokens_used = Column(Integer, default=0)
     is_active = Column(Boolean, default=True)
@@ -47,6 +49,8 @@ class ChatLog(Base):
     query = Column(Text)
     response = Column(Text)
     tokens_used = Column(Integer)
+    has_file_upload = Column(Boolean, default=False)
+    file_type = Column(String, nullable=True)
     timestamp = Column(DateTime, default=datetime.utcnow)
 
 # Database setup
@@ -59,7 +63,7 @@ def authenticate_admin(username: str, password: str) -> bool:
     """Authenticate admin user"""
     return username == ADMIN_USERNAME and password == ADMIN_PASSWORD
 
-def create_user(username: str, email: str, token_limit: int) -> bool:
+def create_user(username: str, email: str, faculty: str, token_limit: int) -> bool:
     """Create new user"""
     db = get_db()
     try:
@@ -74,6 +78,7 @@ def create_user(username: str, email: str, token_limit: int) -> bool:
         new_user = User(
             username=username,
             email=email,
+            faculty=faculty,
             token_limit=token_limit,
             tokens_used=0,
             is_active=True
@@ -90,13 +95,13 @@ def create_user(username: str, email: str, token_limit: int) -> bool:
 
 # Page config
 st.set_page_config(
-    page_title="Admin Console",
-    page_icon="⚙️",
+    page_title="Faculty Admin Console",
+    page_icon="🎓",
     layout="wide"
 )
 
 def main():
-    st.title("⚙️ Admin Console")
+    st.title("🎓 Faculty Admin Console")
     
     # Admin authentication
     if 'admin_authenticated' not in st.session_state:
@@ -124,7 +129,7 @@ def main():
     st.sidebar.title("Navigation")
     page = st.sidebar.selectbox(
         "Choose a page",
-        ["Dashboard", "User Management", "Chat Logs", "Document Management"]
+        ["Dashboard", "User Management", "Chat Logs", "Document Management", "Faculty Analytics"]
     )
     
     if st.sidebar.button("Logout"):
@@ -140,9 +145,11 @@ def main():
         show_chat_logs()
     elif page == "Document Management":
         show_document_management()
+    elif page == "Faculty Analytics":
+        show_faculty_analytics()
 
 def show_dashboard():
-    """Show dashboard with statistics"""
+    """Show dashboard with faculty statistics"""
     st.header("📊 Dashboard")
     
     db = get_db()
@@ -153,9 +160,10 @@ def show_dashboard():
         active_users = db.query(User).filter(User.is_active == True).count()
         total_chats = db.query(ChatLog).count()
         total_tokens_used = db.query(func.sum(ChatLog.tokens_used)).scalar() or 0
+        file_upload_chats = db.query(ChatLog).filter(ChatLog.has_file_upload == True).count()
         
         # Display metrics
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5 = st.columns(5)
         
         with col1:
             st.metric("Total Users", total_users)
@@ -169,70 +177,66 @@ def show_dashboard():
         with col4:
             st.metric("Total Tokens Used", total_tokens_used)
         
-        # Charts
-        st.subheader("📈 Analytics")
+        with col5:
+            st.metric("File Upload Chats", file_upload_chats)
         
-        # User token usage chart
-        users = db.query(User).all()
-        if users:
-            user_data = pd.DataFrame([{
-                'username': user.username,
-                'tokens_used': user.tokens_used,
-                'token_limit': user.token_limit,
-                'usage_percent': (user.tokens_used / user.token_limit * 100) if user.token_limit > 0 else 0
-            } for user in users])
+        # Faculty breakdown
+        st.subheader("👥 Users by Faculty")
+        faculty_users = db.query(User.faculty, func.count(User.id).label('user_count')).group_by(User.faculty).all()
+        
+        if faculty_users:
+            faculty_data = pd.DataFrame(faculty_users, columns=['Faculty', 'Users'])
+            faculty_data['Faculty'] = faculty_data['Faculty'].fillna('general')
             
             col1, col2 = st.columns(2)
             
             with col1:
-                fig = go.Figure()
-                
-                # Add separate bars for token limit and used tokens
-                fig.add_trace(go.Bar(
-                    name='Token Limit',
-                    x=user_data['username'],
-                    y=user_data['token_limit'],
-                    marker_color='lightblue',
-                    offsetgroup=1
-                ))
-                
-                fig.add_trace(go.Bar(
-                    name='Tokens Used',
-                    x=user_data['username'],
-                    y=user_data['tokens_used'],
-                    marker_color='darkblue',
-                    offsetgroup=2
-                ))
-                
-                fig.update_layout(
-                    title='Token Usage by User',
-                    xaxis_title='Username',
-                    yaxis_title='Tokens',
-                    barmode='group',  # This creates separate columns
-                    showlegend=True
-                )
-                
+                fig = px.bar(faculty_data, x='Faculty', y='Users', 
+                           title='Users per Faculty')
                 st.plotly_chart(fig, use_container_width=True)
             
             with col2:
-                fig = px.pie(user_data, values='tokens_used', names='username',
-                           title='Token Distribution')
+                fig = px.pie(faculty_data, values='Users', names='Faculty',
+                           title='Faculty Distribution')
                 st.plotly_chart(fig, use_container_width=True)
         
-        # Chat activity over time
-        chat_logs = db.query(ChatLog).all()
-        if chat_logs:
-            chat_data = pd.DataFrame([{
-                'date': log.timestamp.date(),
-                'hour': log.timestamp.hour,
-                'tokens': log.tokens_used
-            } for log in chat_logs])
+        # Token usage by faculty
+        st.subheader("💰 Token Usage by Faculty")
+        faculty_tokens = db.query(
+            User.faculty, 
+            func.sum(User.tokens_used).label('total_tokens')
+        ).group_by(User.faculty).all()
+        
+        if faculty_tokens:
+            token_data = pd.DataFrame(faculty_tokens, columns=['Faculty', 'Tokens'])
+            token_data['Faculty'] = token_data['Faculty'].fillna('general')
+            token_data['Tokens'] = token_data['Tokens'].fillna(0)
             
-            daily_activity = chat_data.groupby('date').size().reset_index(name='chat_count')
-            
-            fig = px.line(daily_activity, x='date', y='chat_count',
-                         title='Daily Chat Activity')
+            fig = px.bar(token_data, x='Faculty', y='Tokens',
+                       title='Token Usage by Faculty')
             st.plotly_chart(fig, use_container_width=True)
+        
+        # Document collections
+        st.subheader("📚 Document Collections")
+        collections = EmbeddingService.get_all_faculty_collections()
+        
+        if collections:
+            collection_data = pd.DataFrame(collections)
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                fig = px.bar(collection_data, x='faculty', y='count',
+                           title='Documents per Faculty')
+                st.plotly_chart(fig, use_container_width=True)
+            
+            with col2:
+                # Show collection details
+                st.write("**Collection Details:**")
+                for collection in collections:
+                    st.write(f"• **{collection['faculty']}**: {collection['count']} documents")
+        else:
+            st.info("No document collections found")
         
     except Exception as e:
         st.error(f"Error loading dashboard: {e}")
@@ -240,7 +244,7 @@ def show_dashboard():
         db.close()
 
 def show_user_management():
-    """Show user management interface"""
+    """Show user management interface with faculty support"""
     st.header("👥 User Management")
     
     tab1, tab2, tab3 = st.tabs(["All Users", "Create User", "Edit User"])
@@ -257,6 +261,7 @@ def show_user_management():
                     'ID': user.id,
                     'Username': user.username,
                     'Email': user.email,
+                    'Faculty': user.faculty or 'general',
                     'Token Limit': user.token_limit,
                     'Tokens Used': user.tokens_used,
                     'Usage %': f"{(user.tokens_used/user.token_limit*100):.1f}%" if user.token_limit > 0 else "0%",
@@ -265,6 +270,15 @@ def show_user_management():
                 } for user in users])
                 
                 st.dataframe(user_data, use_container_width=True)
+                
+                # Filter by faculty
+                st.subheader("Filter by Faculty")
+                available_faculties = ['All'] + list(user_data['Faculty'].unique())
+                selected_faculty = st.selectbox("Select Faculty", available_faculties)
+                
+                if selected_faculty != 'All':
+                    filtered_data = user_data[user_data['Faculty'] == selected_faculty]
+                    st.dataframe(filtered_data, use_container_width=True)
             else:
                 st.info("No users found")
         except Exception as e:
@@ -278,12 +292,19 @@ def show_user_management():
         with st.form("create_user_form"):
             username = st.text_input("Username")
             email = st.text_input("Email")
+            
+            # Faculty selection
+            available_faculties = EmbeddingService.get_available_faculties()
+            if 'general' not in available_faculties:
+                available_faculties.insert(0, 'general')
+            
+            faculty = st.selectbox("Faculty", available_faculties)
             token_limit = st.number_input("Token Limit", value=DEFAULT_TOKEN_LIMIT, min_value=100)
             
             if st.form_submit_button("Create User"):
                 if username and email:
-                    if create_user(username, email, token_limit):
-                        st.success(f"User '{username}' created successfully!")
+                    if create_user(username, email, faculty, token_limit):
+                        st.success(f"User '{username}' created successfully in {faculty} faculty!")
                         st.rerun()
                     else:
                         st.error("Failed to create user. Username or email might already exist.")
@@ -297,7 +318,7 @@ def show_user_management():
         try:
             users = db.query(User).all()
             if users:
-                user_options = {f"{user.username} ({user.email})": user.id for user in users}
+                user_options = {f"{user.username} ({user.email}) - {user.faculty or 'general'}": user.id for user in users}
                 selected_user = st.selectbox("Select User", list(user_options.keys()))
                 
                 if selected_user:
@@ -305,11 +326,20 @@ def show_user_management():
                     user = db.query(User).filter(User.id == user_id).first()
                     
                     with st.form("edit_user_form"):
+                        # Faculty selection for editing
+                        available_faculties = EmbeddingService.get_available_faculties()
+                        if 'general' not in available_faculties:
+                            available_faculties.insert(0, 'general')
+                        
+                        current_faculty_index = available_faculties.index(user.faculty or 'general') if (user.faculty or 'general') in available_faculties else 0
+                        new_faculty = st.selectbox("Faculty", available_faculties, index=current_faculty_index)
+                        
                         new_token_limit = st.number_input("Token Limit", value=user.token_limit)
                         reset_tokens = st.checkbox("Reset used tokens to 0")
                         is_active = st.checkbox("Active", value=user.is_active)
                         
                         if st.form_submit_button("Update User"):
+                            user.faculty = new_faculty
                             user.token_limit = new_token_limit
                             user.is_active = is_active
                             
@@ -325,31 +355,47 @@ def show_user_management():
             db.close()
 
 def show_chat_logs():
-    """Show chat logs interface"""
+    """Show chat logs interface with faculty and file upload filtering"""
     st.header("💬 Chat Logs")
     
     db = get_db()
     
     try:
         # Filters
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         
         with col1:
             users = db.query(User).all()
-            user_options = ["All Users"] + [user.username for user in users]
+            user_options = ["All Users"] + [f"{user.username} ({user.faculty or 'general'})" for user in users]
             selected_user = st.selectbox("Filter by User", user_options)
         
         with col2:
-            days_back = st.number_input("Days back", value=7, min_value=1)
+            faculty_options = ["All Faculties"] + EmbeddingService.get_available_faculties()
+            selected_faculty = st.selectbox("Filter by Faculty", faculty_options)
         
         with col3:
-            limit = st.number_input("Max records", value=50, min_value=10)
+            file_filter = st.selectbox("File Uploads", ["All Chats", "With Files", "Without Files"])
         
-        # Query chat logs
+        with col4:
+            days_back = st.number_input("Days back", value=7, min_value=1)
+        
+        limit = st.number_input("Max records", value=50, min_value=10)
+        
+        # Query chat logs with joins
         query = db.query(ChatLog, User).join(User, ChatLog.user_id == User.id)
         
+        # Apply filters
         if selected_user != "All Users":
-            query = query.filter(User.username == selected_user)
+            username = selected_user.split(" (")[0]
+            query = query.filter(User.username == username)
+        
+        if selected_faculty != "All Faculties":
+            query = query.filter(User.faculty == selected_faculty)
+        
+        if file_filter == "With Files":
+            query = query.filter(ChatLog.has_file_upload == True)
+        elif file_filter == "Without Files":
+            query = query.filter(ChatLog.has_file_upload == False)
         
         # Date filter
         date_filter = datetime.now() - timedelta(days=days_back)
@@ -361,10 +407,21 @@ def show_chat_logs():
             st.subheader(f"Found {len(chat_logs)} chat logs")
             
             for chat_log, user in chat_logs:
-                with st.expander(f"{user.username} - {chat_log.timestamp.strftime('%Y-%m-%d %H:%M:%S')}"):
+                file_icon = "📎" if chat_log.has_file_upload else "💬"
+                faculty_tag = f"[{user.faculty or 'general'}]"
+                
+                with st.expander(f"{file_icon} {faculty_tag} {user.username} - {chat_log.timestamp.strftime('%Y-%m-%d %H:%M:%S')}"):
                     st.write("**Query:**", chat_log.query)
                     st.write("**Response:**", chat_log.response)
-                    st.write("**Tokens Used:**", chat_log.tokens_used)
+                    
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.write("**Tokens Used:**", chat_log.tokens_used)
+                    with col2:
+                        st.write("**Faculty:**", user.faculty or 'general')
+                    with col3:
+                        if chat_log.has_file_upload:
+                            st.write("**File Type:**", chat_log.file_type or 'unknown')
         else:
             st.info("No chat logs found for the selected criteria")
     
@@ -374,27 +431,39 @@ def show_chat_logs():
         db.close()
 
 def show_document_management():
-    """Enhanced document management interface"""
-    st.header("📄 Document Management")
+    """Enhanced document management interface with faculty selection"""
+    st.header("📄 Faculty Document Management")
     
-    # Initialize embedding service
+    # Faculty selection at the top
+    st.subheader("🎓 Select Faculty")
+    available_faculties = EmbeddingService.get_available_faculties()
+    if 'general' not in available_faculties:
+        available_faculties.insert(0, 'general')
+    
+    selected_faculty = st.selectbox(
+        "Choose faculty to manage documents:",
+        available_faculties,
+        help="Select which faculty's document collection to manage"
+    )
+    
+    # Initialize embedding service for selected faculty
     try:
-        embedding_service = EmbeddingService()
+        embedding_service = EmbeddingService(faculty=selected_faculty if selected_faculty != 'general' else None)
         
-        # Collection info with enhanced metrics
-        st.subheader("📊 Collection Information")
+        # Collection info with faculty context
+        st.subheader(f"📊 {selected_faculty.title()} Faculty Collection")
         collection_info = embedding_service.get_collection_info()
         
         if "error" not in collection_info:
             col1, col2, col3, col4 = st.columns(4)
             with col1:
-                st.metric("Collection Name", collection_info.get("name", "N/A"))
+                st.metric("Faculty", selected_faculty.title())
             with col2:
                 st.metric("Total Chunks", collection_info.get("count", 0))
             with col3:
                 st.metric("Unique Documents", collection_info.get("unique_documents", 0))
             with col4:
-                st.metric("Current Chunk Size", collection_info.get("chunk_size", "N/A"))
+                st.metric("Chunk Size", collection_info.get("chunk_size", "N/A"))
         else:
             st.error(f"Error getting collection info: {collection_info['error']}")
         
@@ -403,7 +472,7 @@ def show_document_management():
         
         # Tab 1: List and manage stored documents
         with tab1:
-            st.subheader("Stored Documents")
+            st.subheader(f"Documents in {selected_faculty.title()} Faculty")
             
             # Refresh button
             if st.button("🔄 Refresh List"):
@@ -413,10 +482,7 @@ def show_document_management():
             stored_docs = embedding_service.list_stored_documents()
             
             if stored_docs:
-                st.write(f"**Found {len(stored_docs)} documents:**")
-                
-                # Create a dataframe for better display
-                doc_data = pd.DataFrame(stored_docs)
+                st.write(f"**Found {len(stored_docs)} documents in {selected_faculty} faculty:**")
                 
                 # Display documents with action buttons
                 for idx, doc in enumerate(stored_docs):
@@ -426,19 +492,20 @@ def show_document_management():
                         with col1:
                             st.write(f"**Filename:** {doc['filename']}")
                             st.write(f"**Chunks:** {doc['chunk_count']}")
+                            st.write(f"**Faculty:** {doc['faculty']}")
                         
                         with col2:
                             # Preview chunks button
-                            if st.button("👁️ Preview", key=f"preview_{idx}"):
-                                st.session_state[f"show_preview_{idx}"] = True
+                            if st.button("👁️ Preview", key=f"preview_{selected_faculty}_{idx}"):
+                                st.session_state[f"show_preview_{selected_faculty}_{idx}"] = True
                         
                         with col3:
                             # Delete button with confirmation
-                            if st.button("🗑️ Delete", key=f"delete_{idx}", type="secondary"):
-                                st.session_state[f"confirm_delete_{idx}"] = True
+                            if st.button("🗑️ Delete", key=f"delete_{selected_faculty}_{idx}", type="secondary"):
+                                st.session_state[f"confirm_delete_{selected_faculty}_{idx}"] = True
                         
                         # Show preview if requested
-                        if st.session_state.get(f"show_preview_{idx}", False):
+                        if st.session_state.get(f"show_preview_{selected_faculty}_{idx}", False):
                             chunks = embedding_service.get_document_chunks(doc['filename'], limit=3)
                             if chunks:
                                 st.write("**Sample chunks:**")
@@ -448,60 +515,33 @@ def show_document_management():
                                 st.info("No chunks to preview")
                         
                         # Show delete confirmation
-                        if st.session_state.get(f"confirm_delete_{idx}", False):
-                            st.warning(f"⚠️ Are you sure you want to delete '{doc['filename']}'?")
-                            st.write("This will remove all chunks of this document from the vector database.")
+                        if st.session_state.get(f"confirm_delete_{selected_faculty}_{idx}", False):
+                            st.warning(f"⚠️ Are you sure you want to delete '{doc['filename']}' from {selected_faculty} faculty?")
                             
                             col_confirm, col_cancel = st.columns(2)
                             with col_confirm:
-                                if st.button("✅ Yes, Delete", key=f"confirm_{idx}", type="primary"):
+                                if st.button("✅ Yes, Delete", key=f"confirm_{selected_faculty}_{idx}", type="primary"):
                                     if embedding_service.remove_document_by_filename(doc['filename']):
                                         st.success(f"Successfully deleted '{doc['filename']}'")
-                                        # Clear session state
-                                        st.session_state[f"confirm_delete_{idx}"] = False
+                                        st.session_state[f"confirm_delete_{selected_faculty}_{idx}"] = False
                                         st.rerun()
                                     else:
                                         st.error(f"Failed to delete '{doc['filename']}'")
                             
                             with col_cancel:
-                                if st.button("❌ Cancel", key=f"cancel_{idx}"):
-                                    st.session_state[f"confirm_delete_{idx}"] = False
+                                if st.button("❌ Cancel", key=f"cancel_{selected_faculty}_{idx}"):
+                                    st.session_state[f"confirm_delete_{selected_faculty}_{idx}"] = False
                                     st.rerun()
-                
-                # Bulk operations
-                st.subheader("🔧 Bulk Operations")
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    if st.button("🗑️ Clear All Documents", type="secondary"):
-                        st.session_state.confirm_clear_all = True
-                
-                # Clear all confirmation
-                if st.session_state.get("confirm_clear_all", False):
-                    st.warning("⚠️ **WARNING: This will delete ALL documents from the collection!**")
-                    st.write("This action cannot be undone.")
-                    
-                    col_confirm, col_cancel = st.columns(2)
-                    with col_confirm:
-                        if st.button("✅ Yes, Clear All", type="primary"):
-                            if embedding_service.clear_all_documents():
-                                st.success("All documents cleared successfully!")
-                                st.session_state.confirm_clear_all = False
-                                st.rerun()
-                            else:
-                                st.error("Failed to clear documents")
-                    
-                    with col_cancel:
-                        if st.button("❌ Cancel"):
-                            st.session_state.confirm_clear_all = False
-                            st.rerun()
             else:
-                st.info("No documents stored in the collection yet.")
+                st.info(f"No documents stored in {selected_faculty} faculty yet.")
                 st.write("Upload some documents in the 'Upload Documents' tab to get started!")
         
-        # Tab 2: Upload new documents with configurable settings
+        # Tab 2: Upload new documents with faculty context
         with tab2:
-            st.subheader("Upload New Documents")
+            st.subheader(f"Upload Documents to {selected_faculty.title()} Faculty")
+            
+            # Show current faculty context
+            st.info(f"📚 Documents will be uploaded to: **{selected_faculty.title()} Faculty**")
             
             # Chunk settings configuration
             st.subheader("🔧 Chunk Settings")
@@ -511,24 +551,21 @@ def show_document_management():
                 chunk_size = st.number_input(
                     "Chunk Size", 
                     min_value=100, 
-                    max_value=8000, 
+                    max_value=30000,  # Increased from 8000 to 30000
                     value=collection_info.get("chunk_size", 5000),
-                    step=100,
-                    help="Size of each text chunk in characters"
+                    step=500,  # Increased step for easier navigation
+                    help="Size of each text chunk in characters (max 30,000)"
                 )
             
             with col2:
                 chunk_overlap = st.number_input(
                     "Chunk Overlap", 
                     min_value=0, 
-                    max_value=chunk_size//2, 
+                    max_value=min(chunk_size//2, 10000),  # Increased max overlap
                     value=min(collection_info.get("chunk_overlap", 500), chunk_size//2),
-                    step=50,
-                    help="Overlap between consecutive chunks"
+                    step=100,  # Increased step
+                    help="Overlap between consecutive chunks (max 10,000 or half of chunk size)"
                 )
-            
-            # Settings info
-            st.info(f"📝 Files will be processed with {chunk_size} character chunks and {chunk_overlap} character overlap")
             
             # File upload
             uploaded_files = st.file_uploader(
@@ -539,13 +576,14 @@ def show_document_management():
             )
             
             if uploaded_files:
-                st.write(f"**Selected {len(uploaded_files)} file(s):**")
+                st.write(f"**Selected {len(uploaded_files)} file(s) for {selected_faculty} faculty:**")
                 for file in uploaded_files:
                     st.write(f"- {file.name} ({file.size} bytes)")
                 
                 if st.button("🚀 Process and Upload Documents", type="primary"):
-                    # Create embedding service with custom settings
+                    # Create embedding service with custom settings for selected faculty
                     custom_embedding_service = EmbeddingService(
+                        faculty=selected_faculty if selected_faculty != 'general' else None,
                         custom_chunk_size=chunk_size,
                         custom_chunk_overlap=chunk_overlap
                     )
@@ -592,9 +630,9 @@ def show_document_management():
         
         # Tab 3: Test search functionality
         with tab3:
-            st.subheader("🔍 Test Search")
+            st.subheader(f"🔍 Test Search in {selected_faculty.title()} Faculty")
             
-            test_query = st.text_input("Enter test query", placeholder="What is our company about?")
+            test_query = st.text_input("Enter test query", placeholder=f"Search in {selected_faculty} faculty documents...")
             
             col1, col2 = st.columns(2)
             with col1:
@@ -602,12 +640,12 @@ def show_document_management():
             
             if test_query:
                 if st.button("🔍 Search", type="primary"):
-                    with st.spinner("Searching..."):
+                    with st.spinner(f"Searching {selected_faculty} faculty documents..."):
                         try:
                             results = embedding_service.search_similar_documents(test_query, k=search_k)
                             
                             if results:
-                                st.write(f"**Found {len(results)} results:**")
+                                st.write(f"**Found {len(results)} results in {selected_faculty} faculty:**")
                                 for i, result in enumerate(results, 1):
                                     with st.expander(f"Result {i} - Score: {getattr(result, 'score', 'N/A')}"):
                                         st.write("**Content:**")
@@ -616,16 +654,17 @@ def show_document_management():
                                         if hasattr(result, 'metadata') and result.metadata:
                                             st.write("**Source:**")
                                             filename = result.metadata.get('filename', 'Unknown')
-                                            st.write(f"📄 {filename}")
+                                            faculty = result.metadata.get('faculty', 'Unknown')
+                                            st.write(f"📄 {filename} ({faculty} faculty)")
                             else:
-                                st.info("No results found for your query.")
+                                st.info(f"No results found in {selected_faculty} faculty for your query.")
                                 st.write("Try different keywords or check if documents are uploaded correctly.")
                         except Exception as e:
                             st.error(f"Search error: {e}")
         
         # Tab 4: Settings and statistics
         with tab4:
-            st.subheader("⚙️ Collection Settings & Statistics")
+            st.subheader(f"⚙️ {selected_faculty.title()} Faculty Settings")
             
             # Current settings
             stats = embedding_service.get_chunk_statistics()
@@ -635,6 +674,7 @@ def show_document_management():
                 
                 with col1:
                     st.write("**Current Configuration:**")
+                    st.write(f"- Faculty: {stats.get('faculty', 'Unknown')}")
                     st.write(f"- Chunk Size: {stats.get('configured_chunk_size', 'N/A')}")
                     st.write(f"- Chunk Overlap: {stats.get('configured_overlap', 'N/A')}")
                     st.write(f"- Total Chunks: {stats.get('total_chunks', 0)}")
@@ -647,29 +687,28 @@ def show_document_management():
                     st.write(f"- Max Length: {stats.get('max_length', 0)} chars")
                     st.write(f"- Sample Size: {stats.get('sample_size', 0)} chunks")
                 
-                # Manual clear section
-                st.subheader("🗑️ Database Cleanup")
+                # Clear faculty collection
+                st.subheader("🗑️ Clear Faculty Collection")
                 
-                # Check if there are any chunks at all
                 total_chunks = collection_info.get("count", 0)
                 
                 if total_chunks > 0:
-                    st.warning(f"Found {total_chunks} total chunks in the database")
+                    st.warning(f"Found {total_chunks} chunks in {selected_faculty} faculty collection")
                     
-                    if st.button("🗑️ Clear Entire Collection", type="secondary"):
-                        st.session_state.confirm_clear_entire = True
+                    if st.button(f"🗑️ Clear {selected_faculty.title()} Faculty Collection", type="secondary"):
+                        st.session_state[f"confirm_clear_faculty_{selected_faculty}"] = True
                     
                     # Clear confirmation
-                    if st.session_state.get("confirm_clear_entire", False):
-                        st.error("⚠️ **WARNING: This will delete ALL chunks from the collection!**")
+                    if st.session_state.get(f"confirm_clear_faculty_{selected_faculty}", False):
+                        st.error(f"⚠️ **WARNING: This will delete ALL documents from {selected_faculty} faculty!**")
                         st.write("This action cannot be undone")
                         
                         col_confirm, col_cancel = st.columns(2)
                         with col_confirm:
-                            if st.button("✅ Yes, Clear Everything", type="primary"):
+                            if st.button("✅ Yes, Clear Faculty Collection", type="primary"):
                                 if embedding_service.clear_all_documents():
-                                    st.success("✅ Entire collection cleared successfully!")
-                                    st.session_state.confirm_clear_entire = False
+                                    st.success(f"✅ {selected_faculty.title()} faculty collection cleared successfully!")
+                                    st.session_state[f"confirm_clear_faculty_{selected_faculty}"] = False
                                     st.balloons()
                                     st.rerun()
                                 else:
@@ -677,23 +716,10 @@ def show_document_management():
                         
                         with col_cancel:
                             if st.button("❌ Cancel"):
-                                st.session_state.confirm_clear_entire = False
+                                st.session_state[f"confirm_clear_faculty_{selected_faculty}"] = False
                                 st.rerun()
                 else:
-                    st.info("Collection is empty - no chunks to clear")
-                
-                # Chunk size recommendations
-                st.subheader("💡 Chunk Size Recommendations")
-                
-                recommendations = {
-                    "Small (500-1000)": "Best for specific, detailed queries and FAQ-style content",
-                    "Medium (1000-2000)": "Balanced approach, good for most business documents", 
-                    "Large (2000-4000)": "Better context retention, good for complex technical documents",
-                    "XLarge (4000+)": "Maximum context, use for very long documents or research papers"
-                }
-                
-                for size_range, description in recommendations.items():
-                    st.write(f"**{size_range}:** {description}")
+                    st.info(f"{selected_faculty.title()} faculty collection is empty - no documents to clear")
             
             else:
                 st.error(f"Error getting statistics: {stats['error']}")
@@ -701,6 +727,111 @@ def show_document_management():
     except Exception as e:
         st.error(f"Error initializing document management: {e}")
         st.write("Please check your configuration and try again.")
+
+def show_faculty_analytics():
+    """Show detailed faculty analytics"""
+    st.header("📈 Faculty Analytics")
+    
+    db = get_db()
+    
+    try:
+        # Faculty overview
+        st.subheader("🎓 Faculty Overview")
+        
+        # Get faculty statistics
+        faculty_users = db.query(User.faculty, func.count(User.id).label('user_count')).group_by(User.faculty).all()
+        faculty_tokens = db.query(User.faculty, func.sum(User.tokens_used).label('total_tokens')).group_by(User.faculty).all()
+        
+        # Document collections
+        collections = EmbeddingService.get_all_faculty_collections()
+        
+        # Combine data
+        faculty_stats = {}
+        
+        # Initialize with user data
+        for faculty, user_count in faculty_users:
+            faculty_name = faculty or 'general'
+            faculty_stats[faculty_name] = {
+                'users': user_count,
+                'tokens': 0,
+                'documents': 0
+            }
+        
+        # Add token data
+        for faculty, token_count in faculty_tokens:
+            faculty_name = faculty or 'general'
+            if faculty_name in faculty_stats:
+                faculty_stats[faculty_name]['tokens'] = token_count or 0
+        
+        # Add document data
+        for collection in collections:
+            faculty_name = collection['faculty']
+            if faculty_name in faculty_stats:
+                faculty_stats[faculty_name]['documents'] = collection['count']
+            else:
+                faculty_stats[faculty_name] = {
+                    'users': 0,
+                    'tokens': 0,
+                    'documents': collection['count']
+                }
+        
+        # Display as table
+        if faculty_stats:
+            faculty_df = pd.DataFrame.from_dict(faculty_stats, orient='index')
+            faculty_df.index.name = 'Faculty'
+            faculty_df.columns = ['Users', 'Tokens Used', 'Documents']
+            faculty_df = faculty_df.reset_index()
+            
+            st.dataframe(faculty_df, use_container_width=True)
+            
+            # Visualizations
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                fig = px.bar(faculty_df, x='Faculty', y=['Users', 'Documents'],
+                           title='Users and Documents by Faculty',
+                           barmode='group')
+                st.plotly_chart(fig, use_container_width=True)
+            
+            with col2:
+                fig = px.bar(faculty_df, x='Faculty', y='Tokens Used',
+                           title='Token Usage by Faculty')
+                st.plotly_chart(fig, use_container_width=True)
+        
+        # Recent activity by faculty
+        st.subheader("📊 Recent Activity (Last 7 Days)")
+        
+        week_ago = datetime.now() - timedelta(days=7)
+        recent_chats = db.query(
+            User.faculty,
+            func.count(ChatLog.id).label('chat_count'),
+            func.sum(ChatLog.tokens_used).label('token_usage')
+        ).join(User, ChatLog.user_id == User.id).filter(
+            ChatLog.timestamp >= week_ago
+        ).group_by(User.faculty).all()
+        
+        if recent_chats:
+            recent_df = pd.DataFrame(recent_chats, columns=['Faculty', 'Chats', 'Tokens'])
+            recent_df['Faculty'] = recent_df['Faculty'].fillna('general')
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                fig = px.pie(recent_df, values='Chats', names='Faculty',
+                           title='Chat Distribution (Last 7 Days)')
+                st.plotly_chart(fig, use_container_width=True)
+            
+            with col2:
+                fig = px.bar(recent_df, x='Faculty', y='Tokens',
+                           title='Token Usage (Last 7 Days)')
+                st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No recent activity found")
+    
+    except Exception as e:
+        st.error(f"Error loading faculty analytics: {e}")
+    finally:
+        db.close()
 
 if __name__ == "__main__":
     main()
